@@ -46,6 +46,9 @@ button {
 <div id="objects">Waiting for detection...</div>
 
 <canvas id="capture" style="display:none"></canvas>
+<button onclick="startListening()">START VOICE COMMAND</button>
+
+<p id="voiceStatus">Say a command...</p>
 
 <script>
 
@@ -285,7 +288,52 @@ function speakLastResult() {
         sendToApp("RESULT:No objects detected yet.");
     }
 }
+const SpeechRecognition =
+    window.SpeechRecognition ||
+    window.webkitSpeechRecognition;
 
+let recognition;
+
+if (SpeechRecognition) {
+    recognition = new SpeechRecognition();
+
+    recognition.continuous = true;
+    recognition.interimResults = false;
+    recognition.lang = "en-IN";
+
+    recognition.onresult = function(event) {
+        let command = event.results[
+            event.results.length - 1
+        ][0].transcript.toLowerCase().trim();
+
+        document.getElementById("voiceStatus").innerText =
+            "You said: " + command;
+
+        if (command.includes("start camera")) {
+            startCamera();
+        }
+
+        else if (command.includes("stop camera")) {
+            stopCamera();
+        }
+    };
+
+    recognition.onerror = function(event) {
+        document.getElementById("voiceStatus").innerText =
+            "Voice error: " + event.error;
+    };
+}
+
+function startListening() {
+    if (recognition) {
+        recognition.start();
+        document.getElementById("voiceStatus").innerText =
+            "Listening for commands...";
+    } else {
+        document.getElementById("voiceStatus").innerText =
+            "Speech recognition not supported";
+    }
+}
 </script>
 </body>
 </html>
