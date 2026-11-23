@@ -1,0 +1,291 @@
+
+<!DOCTYPE html>
+<html>
+<head>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Blind Helper AI</title>
+
+<style>
+body {
+    margin: 0;
+    background: #101820;
+    color: white;
+    font-family: Arial;
+    text-align: center;
+}
+h2 { color: #00e5a8; }
+video {
+    width: 100%;
+    max-height: 55vh;
+    background: black;
+    object-fit: contain;
+}
+#status {
+    font-size: 18px;
+    padding: 12px;
+}
+#objects {
+    font-size: 17px;
+    padding: 12px;
+}
+button {
+    padding: 14px 25px;
+    margin: 8px;
+    font-size: 18px;
+}
+</style>
+</head>
+
+<body>
+
+<h2>BLIND HELPER AI</h2>
+
+<video id="camera" autoplay playsinline muted></video>
+
+<div id="status">Camera stopped</div>
+<div id="objects">Waiting for detection...</div>
+
+<canvas id="capture" style="display:none"></canvas>
+
+<script>
+
+// ===================================
+// HUGGING FACE SETTINGS
+// ===================================
+
+const HF_TOKEN = "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";
+
+const API_URL =
+"https://router.huggingface.co/hf-inference/models/facebook/detr-resnet-50";
+
+const CONFIDENCE_LIMIT = 0.55;
+const SCAN_DELAY = 2500;
+
+// ===================================
+// VARIABLES
+// ===================================
+
+const video = document.getElementById("camera");
+const canvas = document.getElementById("capture");
+
+let cameraStream = null;
+let scanning = false;
+let busy = false;
+let lastMessage = "";
+let lastAnnounced = "";
+let lastDetectionTime = 0;
+
+// ===================================
+// APP INVENTOR COMMUNICATION
+// ===================================
+
+function sendToApp(message) {
+    if (window.AppInventor) {
+        window.AppInventor.setWebViewString(message);
+    }
+}
+
+function showStatus(message) {
+    document.getElementById("status").innerText = message;
+    sendToApp("STATUS:" + message);
+}
+
+// ===================================
+// START CAMERA
+// ===================================
+
+async function startCamera() {
+    try {
+        if (cameraStream) {
+            scanning = true;
+            showStatus("Camera scanning");
+            scanLoop();
+            return;
+        }
+
+        cameraStream = await navigator.mediaDevices.getUserMedia({
+            video: {
+                facingMode: { ideal: "environment" },
+                width: { ideal: 640 },
+                height: { ideal: 480 }
+            },
+            audio: false
+        });
+
+        video.srcObject = cameraStream;
+        await video.play();
+
+        scanning = true;
+        lastAnnounced = "";
+
+        showStatus("Camera started");
+        scanLoop();
+
+    } catch (error) {
+        showStatus("Camera error: " + error.message);
+    }
+}
+
+// ===================================
+// STOP CAMERA
+// ===================================
+
+function stopCamera() {
+    scanning = false;
+
+    if (cameraStream) {
+        cameraStream.getTracks().forEach(track => track.stop());
+        cameraStream = null;
+    }
+
+    video.srcObject = null;
+    showStatus("Detection stopped");
+}
+
+// ===================================
+// SCAN CAMERA FRAME
+// ===================================
+
+async function scanLoop() {
+
+    if (!scanning) return;
+
+    if (!busy && video.videoWidth > 0) {
+        busy = true;
+
+        try {
+            const maxWidth = 480;
+            const scale = Math.min(
+                1,
+                maxWidth / video.videoWidth
+            );
+
+            canvas.width = Math.round(video.videoWidth * scale);
+            canvas.height = Math.round(video.videoHeight * scale);
+
+            const context = canvas.getContext("2d");
+
+            context.drawImage(
+                video,
+                0,
+                0,
+                canvas.width,
+                canvas.height
+            );
+
+            const imageBlob = await new Promise(resolve => {
+                canvas.toBlob(resolve, "image/jpeg", 0.60);
+            });
+
+            if (!imageBlob) {
+                throw new Error("Image compression failed");
+            }
+
+            const response = await fetch(API_URL, {
+                method: "POST",
+                headers: {
+                    "Authorization": "Bearer " + HF_TOKEN,
+                    "Content-Type": "image/jpeg"
+                },
+                body: imageBlob
+            });
+
+            if (!response.ok) {
+                const errorText = await response.text();
+                throw new Error(
+                    "HTTP " + response.status + ": " +
+                    errorText.substring(0, 250)
+                );
+            }
+
+            const predictions = await response.json();
+
+            processDetections(predictions);
+
+        } catch (error) {
+            showStatus(error.message);
+        }
+
+        busy = false;
+    }
+
+    if (scanning) {
+        setTimeout(scanLoop, SCAN_DELAY);
+    }
+}
+
+// ===================================
+// PROCESS OBJECTS
+// ===================================
+
+function processDetections(predictions) {
+
+    const detected = predictions
+        .filter(item => item.score >= CONFIDENCE_LIMIT)
+        .sort((a, b) => b.score - a.score)
+        .slice(0, 5);
+
+    if (detected.length === 0) {
+        lastMessage = "No familiar objects detected.";
+        document.getElementById("objects").innerText =
+            lastMessage;
+        return;
+    }
+
+    const descriptions = detected.map(item => {
+
+        const box = item.box;
+
+        const centerX = (box.xmin + box.xmax) / 2;
+        const percentage = centerX / canvas.width;
+
+        let position;
+
+        if (percentage < 0.35) {
+            position = "on your left";
+        } else if (percentage > 0.65) {
+            position = "on your right";
+        } else {
+            position = "in the centre";
+        }
+
+        return item.label + " " + position;
+    });
+
+    const message = descriptions.join(". ");
+
+    lastMessage = message;
+
+    document.getElementById("objects").innerText =
+        message;
+
+    const now = Date.now();
+
+    // Avoid repeating identical announcements too often
+    if (
+        message !== lastAnnounced ||
+        now - lastDetectionTime > 10000
+    ) {
+        lastAnnounced = message;
+        lastDetectionTime = now;
+
+        sendToApp("RESULT:" + message);
+    }
+}
+
+// ===================================
+// REPEAT LAST RESULT
+// ===================================
+
+function speakLastResult() {
+
+    if (lastMessage) {
+        sendToApp("RESULT:" + lastMessage);
+    } else {
+        sendToApp("RESULT:No objects detected yet.");
+    }
+}
+
+</script>
+</body>
+</html>
